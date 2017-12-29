@@ -1,6 +1,11 @@
 # Layer-Recurrent-Neural-Network
 Layer Recurrent Neural Network Implementation with Tensorflow
 
+Paper : Layer Recurrent Neural Networks
+URL : https://openreview.net/forum?id=rJJRDvcex
+Date : 2016.11.05
+Authors :  Weidi Xie, Alison Noble, Andrew Zisserman
+
 Layer Recurrent Neural Network is expanded version of ReNet and SegNet.
 
 It combines Convolutional Neural Network (CNN) and Recurrent Neural Network (RNN).
