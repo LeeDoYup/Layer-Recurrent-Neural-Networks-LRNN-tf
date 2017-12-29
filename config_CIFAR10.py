@@ -1,0 +1,34 @@
+#Config for CIFAR10_data
+#Check train+valid+test = 1
+
+
+OPTIMIZER_TYPE = 'GD'
+OUTPUT_DIM = 10
+LEARNING_RATE = 0.1
+REGULARIZATION = True
+REGULARIZATION_PARA = 0.001
+EPOCH = 400
+BATCH_SIZE = 128
+
+IMAGE_WIDTH = 32
+IMAGE_HEIGHT = 32
+IMAGE_DEPTH = 3
+
+INPUT_DIM = IMAGE_WIDTH * IMAGE_HEIGHT * IMAGE_DEPTH
+
+INPUT_X_FILE = 'data_batch'
+INPUT_Y_FILE = 'data_batch'
+
+TRAIN_RATE = 0.9
+VALID_RATE = 0.1
+
+IS_RATE_DECAYING = True
+DECAYING_EPOCH = 100
+DECAYING_RATE = 0.1
+STAIRCASE = True
+
+
+SAVE_DIRECTORY_LOSS_OUT = '/home/learning-machine/kihyun/savedir'
+SAVE_DIRECTORY_PARAS = '/home/learning-machine/kihyun/savedir'
+SAVE_DIRECTORY_CHECKS = '/home/learning-machine/kihyun/savedir'
+

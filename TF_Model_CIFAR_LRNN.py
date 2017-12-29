@@ -1,0 +1,495 @@
+import numpy as np
+import tensorflow as tf 
+import matplotlib.pyplot as plt
+import math
+import sys
+import pdb
+
+from LRNN_utils import *
+
+from config_CIFAR10 import *
+from read_CIFAR10 import *
+from result_summary import *
+
+
+
+def Recurrent_Cell(output_size,cell_type='Basic',activation=tf.nn.relu):
+    if cell_type == 'Basic':
+      return tf.contrib.rnn.BasicRNNCell(output_size,activation=activation)
+    if cell_type == 'LSTM':
+      return tf.contrib.rnn.BasicLSTMCell(output_size,activation=activation)
+    if cell_type == 'GRU':
+      return tf.contrib.rnn.GRUCell(output_size,activation=activation)
+    if cell_type == 'LayerNorm':
+      return tf.contrib.rnn.LayerNormBasicLSTMCell(output_size,activation=activation)
+
+
+
+def Layer_recurrent(inputs,output_size,cell_type='Basic',direction_to='LR', result_op='Sum',activation=tf.nn.relu):
+# input shape : [m,n,d] / weight size : [d,D] / weight_recurrent size : [D,D], bias shape [D]
+  shape_list = inputs.get_shape().as_list()
+  batch_size,width, height = BATCH_SIZE,shape_list[1], shape_list[2]
+  if direction_to == 'LR':
+     time_step_size = width
+     inputs = tf.reshape(inputs,[-1, width , height*shape_list[3]])
+     input_reverse = tf.reverse(inputs,axis=[1])
+     with tf.variable_scope('L2R') as scope:
+         cells = Recurrent_Cell(height*output_size,cell_type,activation)
+
+         outputs1, states  = tf.nn.dynamic_rnn(cells,inputs,dtype=tf.float32)
+         outputs1 = tf.reshape(outputs1,[-1,width,height,output_size])
+
+     with tf.variable_scope('R2L') as scope:
+         cells = Recurrent_Cell(height*output_size,cell_type,activation)
+         
+         outputs2, states = tf.nn.dynamic_rnn(cells,input_reverse,dtype=tf.float32)
+         outputs2 = tf.reshape(outputs2,[-1,width,height,output_size])
+
+  if direction_to == 'UD':
+     time_step_size = height
+     input_transpose = tf.transpose(inputs,perm=[0,2,1,3])
+     inputs = tf.reshape(input_transpose,[-1,height,width*shape_list[3]])       
+     input_reverse = tf.reverse(inputs,axis=[1])
+     with tf.variable_scope('U2D') as scope:
+         cells = Recurrent_Cell(width*output_size,cell_type,activation)
+
+         outputs1, states  = tf.nn.dynamic_rnn(cells,inputs,dtype=tf.float32)
+         outputs1 = tf.reshape(outputs1,[-1,width,height,output_size])
+         outputs1 = tf.transpose(outputs1,perm=[0,2,1,3])
+
+     with tf.variable_scope('D2U') as scope:
+         cells = Recurrent_Cell(width*output_size,cell_type,activation)
+         
+         outputs2, states = tf.nn.dynamic_rnn(cells,input_reverse,dtype=tf.float32)
+         outputs2 = tf.reshape(outputs2,[-1,width,height,output_size])
+         outputs2 = tf.transpose(outputs2,perm=[0,2,1,3])
+
+  if result_op == 'Sum':
+    return outputs1+outputs2
+  if result_op == 'Concatenate':
+    return tf.concat([outputs1,outputs2],3)
+        
+
+
+
+
+
+
+def weight_variable(name, shape, initializer = 'normal'):
+#Random normal initializer
+    if initializer == 'normal':
+       initial = tf.truncated_normal(shape,stddev=0.1)
+       return tf.get_variable(name, initializer = initial)
+
+    if initializer == 'Xavier' :
+       initial = tf.contrib.layers.xavier_initializer()
+       return tf.get_variable(name, shape, initializer=initial)
+    else:
+       raise NameError("Invalid Initializer Name with Weight Variable")
+
+
+def batch_normalization(inputs):
+   input_shape = inputs.get_shape()
+   parameter_shape = input_shape[-1:]
+
+   axis = list(range(len(input_shape)-1))
+   epsilon = 0.001
+ 
+   gamma = weight_variable('bn_gammma',parameter_shape)
+   beta = bias_variable('bn_beta',parameter_shape)
+
+   mean, variance = tf.nn.moments(inputs,axis)
+
+   return tf.nn.batch_normalization(inputs,mean,variance,beta,gamma,epsilon)
+  
+
+def CNN_module(inputs,operation,filter_in,filter_out):
+
+   with tf.variable_scope('bn1') as scope:
+       bn1 = tf.nn.relu(batch_normalization(inputs))
+
+   with tf.variable_scope('conv1') as scope:
+       W1 = weight_variable('W1',[3,3,filter_in,filter_out])
+       conv1 = tf.nn.conv2d(bn1,W1,strides=[1,1,1,1],padding='SAME')
+
+   with tf.variable_scope('bn2') as scope:   
+     bn2 = tf.nn.relu(batch_normalization(conv1))
+
+   with tf.variable_scope('conv2') as scope:
+     W2 = weight_variable('W2',[3,3,filter_out,filter_out])
+     conv2 = tf.nn.conv2d(bn2,W2,strides=[1,1,1,1],padding='SAME')
+
+   if operation == 'Forward':
+     return conv2
+   if operation == 'Sum':
+     if(inputs.get_shape() == conv2.get_shape()):
+       return tf.add(inputs,conv2)
+     else:
+       raise TypeError("Cannot add : different size")
+   if operation == 'Concatnate':
+     return tf.concat([inputs,conv2],3)
+   
+
+def LRNN_module(inputs,operation1,operation2,operation_module,filter_in,filter_out):
+
+   with tf.variable_scope('bn1') as scope:
+     bn1 = tf.nn.relu(batch_normalization(inputs))
+
+   with tf.variable_scope('LRNN_LR') as scope:
+     LRNN_LR = Layer_recurrent(bn1,filter_out,cell_type='Basic',direction_to='LR',result_op=operation1)
+
+   with tf.variable_scope('bn2') as scope:
+     bn2 = tf.nn.relu(batch_normalization(LRNN_LR))
+
+   with tf.variable_scope('LRNN_UD') as scope:
+     LRNN_UD = Layer_recurrent(bn2,filter_out,cell_type='Basic',direction_to='UD',result_op=operation2)
+ 
+   if operation_module == 'Forward':
+     return LRNN_UD
+   if operation_module == 'Sum':
+     if(inputs.get_shape() == LRNN_UD.get_shape()):
+       return tf.add(inputs,LRNN_UD)
+     else:
+       raise TypeError("Cannot add : different size")
+
+   if operation_module == 'Concatnate':
+     return tf.concat([inputs,LRNN_UD],3)
+
+
+  
+
+
+#Make Bias Variables with 0.1 constant
+def bias_variable(name, shape):
+        initial = tf.constant(0.1, shape=shape)
+        return tf.get_variable(name, initializer = initial)
+
+#Make Feedforward hidden layer with Activations
+#input = [Number of Data * Number of Input Features], wegiht = [Number of input features * output features]
+#bias = [# of output features]
+#return = [Number of Data * Number of Output Features]
+def full_connected(inputs,weight,bias,activation='ReLU'):
+        if activation == 'ReLU':
+                return tf.nn.relu(tf.matmul(inputs,weight)+bias, name='relu')
+        if activation == 'Sigmoid':
+                return tf.nn.sigmoid(tf.matmul(inputs,weight)+bias, name='sigmoid')
+        if activation == 'Softmax':
+                return tf.nn.softmax(tf.matmul(inputs,weight)+bias, name='softmax')
+
+
+def loss_function(y_true,y_out,loss_type = 'cross_entropy', regularization = 'L2', REGULARIZATION_PARA=0.01):
+        #Chosse Loss function Type: Cross_entropy --> classification, MSE --> Regression
+        if loss_type == 'cross_entropy':
+                epsilon = tf.constant(value=0.00001)
+                loss = tf.reduce_mean(-tf.reduce_sum(y_true*tf.log(y_out+epsilon),axis=1),axis=0)
+        if loss_type == 'MSE':
+                loss = tf.reduce_mean(tf.square(y_out-y_true))
+        if loss_type == 'TimeSeries_MSE':
+                loss = tf.reduce_mean(tf.reduce_sum(tf.square(y_out-y_true),axis=2))
+
+        if REGULARIZATION == True:
+                #Choose Regularizaton Type: L1, L2 
+                vars = tf.trainable_variables()
+                if regularization == 'L2':
+                        loss = loss + tf.add_n([ tf.nn.l2_loss(v) for v in vars ]) * REGULARIZATION_PARA
+                if regularization == 'L1':
+                        loss = loss + tf.add_n([ tf.nn.l1_loss(v) for v in vars ]) * REGULARIZATION_PARA
+
+        return loss
+
+
+def classification_accuracy(test_out, y_test):
+	one_hot_result = np.argmax(test_out,axis=1)
+	one_hot_true = np.argmax(y_test, axis=1)
+	test_size = len(y_test)
+	temp_count = 0
+	for i in range(test_size):
+		if one_hot_result[i] == one_hot_true[i]:
+			temp_count +=1
+
+	accuracy = float(temp_count)/test_size
+	print accuracy
+	return accuracy
+
+
+class Model(object):
+	def __init__(self, sess,x_train,y_train):
+		print "Initialize New Model"
+		self.sess = sess
+		self.train_epoch = 0
+		self.train_loss = []
+		self.validation_loss = []
+		self.min_valid_loss = 9999.999
+
+                train_size = int(len(x_train)*TRAIN_RATE)
+                
+                self.x_train = x_train[:train_size,:]
+                self.y_train = y_train[:train_size,:]
+                self.x_valid = x_train[train_size:,:]
+                self.y_valid = y_train[train_size:,:]
+            
+
+	def _create_place_holders(self):
+		#Make Placeholders in order for feed_dict
+		self.x_inputs = tf.placeholder(tf.float32,[None, INPUT_DIM],name='x_inputs')
+		self.y_inputs = tf.placeholder(tf.float32,[None, OUTPUT_DIM],name='y_inputs')
+
+
+
+	def _inference(self):
+		#How the Inference Graph (Main Model) is decribed?
+		#If you want to change the model, change this part and use proper loss fucntion.
+		print "Create Inference Graph of Main Model"
+
+		self.paras={}
+		self.opt_paras={}
+		self.layers={}
+		images = tf.reshape(self.x_inputs, shape=[-1,IMAGE_WIDTH,IMAGE_HEIGHT,IMAGE_DEPTH])
+
+		with tf.variable_scope('CONV1') as scope:
+			self.paras['W1'] = weight_variable('W1',[3,3,3,64])
+			self.paras['b1'] = bias_variable('b1',[64])
+			self.layers['conv1'] = tf.nn.conv2d(images,self.paras['W1'],strides=[1,1,1,1],padding='SAME')
+			self.layers['relu_conv1'] =  tf.nn.relu(self.layers['conv1']+self.paras['b1'], name=scope.name)
+
+                ##########################                  conv1                  ####################################
+                with tf.variable_scope('CNN1') as scope:
+                        self.layers['CNN1'] = CNN_module(self.layers['relu_conv1'],'Concatnate',64,64)
+
+                with tf.variable_scope('CNN2') as scope:
+                        self.layers['CNN2'] = CNN_module(self.layers['CNN1'],'Concatnate',128,64)
+
+                with tf.variable_scope('CNN3') as scope:
+                        self.layers['CNN3'] = CNN_module(self.layers['CNN2'],'Concatnate',192,64)
+
+                #######################################################################################################
+
+                with tf.variable_scope('pool1') as scope:
+                        self.layers['pool1'] = tf.nn.max_pool(self.layers['CNN3'],ksize=[1,2,2,1],strides=[1,2,2,1],padding='SAME')
+
+                ##########################                  pool 1               ######################################
+
+                with tf.variable_scope('LRNN1') as scope:
+                        self.layers['LRNN1'] = LRNN_module(self.layers['pool1'],'Sum','Sum','Forward',256,128)
+
+                with tf.variable_scope('CNN4') as scope:
+                        self.layers['CNN4'] = CNN_module(self.layers['LRNN1'],'Concatnate',128,64)
+
+                with tf.variable_scope('LRNN2') as scope:
+                        self.layers['LRNN2'] = LRNN_module(self.layers['CNN4'],'Sum','Sum','Forward',192,128)
+
+                with tf.variable_scope('CNN5') as scope:
+                        self.layers['CNN5'] = CNN_module(self.layers['LRNN2'],'Concatnate',128,64)
+
+                ########################################################################################################
+
+                with tf.variable_scope('pool2') as scope:
+                        self.layers['pool2'] = tf.nn.max_pool(self.layers['CNN5'],ksize=[1,2,2,1],strides=[1,2,2,1],padding='SAME')
+
+                ##########################                  pool 2               ######################################
+
+                with tf.variable_scope('LRNN3') as scope:
+                        self.layers['LRNN3'] = LRNN_module(self.layers['pool2'],'Sum','Sum','Forward',192,128)
+ 
+                with tf.variable_scope('CNN6') as scope:
+                        self.layers['CNN6'] = CNN_module(self.layers['LRNN3'],'Concatnate',128,64)
+  
+                with tf.variable_scope('LRNN4') as scope:
+                        self.layers['LRNN4'] = LRNN_module(self.layers['CNN6'],'Sum','Sum','Forward',192,128)
+
+                with tf.variable_scope('CNN7') as scope:
+                        self.layers['CNN7'] = CNN_module(self.layers['LRNN4'],'Concatnate',128,64)
+
+               #########################################################################################################
+ 
+                with tf.variable_scope('pool3') as scope:
+                        self.layers['pool3'] = tf.nn.max_pool(self.layers['CNN7'],ksize=[1,8,8,1],strides=[1,8,8,1],padding='SAME')
+
+                with tf.variable_scope('dropout') as scope:
+                        self.layers['dropout'] = tf.nn.dropout(self.layers['pool3'],0.5)
+
+                with tf.variable_scope('softmax') as scope:
+                        self.paras['W_out'] = weight_variable('W_out',[192,10])
+                        self.paras['b_out'] = bias_variable('b_out',[10])
+                        self.layers['output'] = full_connected(tf.reshape(self.layers['dropout'],[-1,192]),self.paras['W_out'],self.paras['b_out'],activation ='Softmax')
+
+
+	def _create_loss(self,loss_type='cross_entropy',regularization='L2'):
+		print "Create Loss Function"
+		self.loss =  loss_function(self.y_inputs, self.layers['output'], loss_type, regularization, REGULARIZATION_PARA)
+
+	#Types of optimizer = 'GD(Gradient Descent)', 'ADAM', and 'AdaDelta'
+	def _create_optimizer(self,type_optimizer='GD',learning_rate = LEARNING_RATE,rate_decaying=IS_RATE_DECAYING, decaying_epoch=DECAYING_EPOCH, decaying_rate=DECAYING_RATE, staircase=STAIRCASE):
+		print "Create Optimizer..."
+		self.global_step = tf.Variable(0,trainable=False)
+		if rate_decaying == False:
+			if type_optimizer=='GD':
+				self.optimizer = tf.train.GradientDescentOptimizer(learning_rate)
+			if type_optimizer=='ADAM':
+				self.optimizer = tf.train.AdamOptimizer(learning_rate)
+			self.train_step = self.optimizer.minimize(self.loss)
+			return
+		else:
+			decaying_learning_rate = tf.train.exponential_decay(learning_rate, self.global_step, int(len(self.x_train)/BATCH_SIZE)*decaying_epoch, decaying_rate, staircase)
+			if type_optimizer == 'GD':
+				self.optimizer = tf.train.GradientDescentOptimizer(decaying_learning_rate)
+			if type_optimizer == 'ADAM':
+				self.optimizer = tf.train.AdamOptimizer(decaying_learning_rate)
+			self.train_step = self.optimizer.minimize(self.loss)
+			return
+
+
+	#Run Optimizer in order to minimize loss function and return its loss_value
+	def batch_train(self,feed_dict):
+		loss = self.loss
+		loss_value, _ = self.sess.run([loss,self.train_step],feed_dict = feed_dict)
+		return loss_value
+
+	#return loss value of feed_dict input
+	def batch_loss(self,feed_dict):
+		loss = self.loss
+		loss_value = self.sess.run(loss,feed_dict=feed_dict)
+		return loss_value
+
+	#return output result of feed_dict input
+	def batch_out(self,feed_dict):
+		outputs = self.sess.run(self.layers['output'], feed_dict=feed_dict)
+		return outputs
+
+
+	def run_train_epoch(self):
+		#parameter initializes: loss, cumulative loss
+		loss = 0
+		cumulative_loss = 0
+		train_loss = 0
+		self.train_epoch += 1
+
+		batch_number = int(len(self.x_train)/BATCH_SIZE)
+
+		for i in range(batch_number):
+			x_batch = self.x_train[i*BATCH_SIZE:(i+1)*BATCH_SIZE,:]
+			y_batch = self.y_train[i*BATCH_SIZE:(i+1)*BATCH_SIZE,:]
+
+			feed_dict = {self.x_inputs:x_batch, self.y_inputs:y_batch}
+
+			loss = self.batch_train(feed_dict)
+			cumulative_loss += loss
+			#calculate average_loss for display
+			average_loss = cumulative_loss / (i+1)
+
+			sys.stdout.write("\r training loss : "+str(average_loss)+" | "+str(i+1)+"th/"+str(batch_number)+"batches")
+			sys.stdout.flush()
+			train_loss += loss
+
+		train_loss = train_loss/batch_number
+		self.train_loss.append(train_loss)
+		return train_loss
+
+	def run_validation(self):
+		valid_size = len(self.x_valid)
+                cumulative_loss = 0
+                loss = 0
+                valid_loss = 0
+                batch_number = int(valid_size/BATCH_SIZE)
+                for i in range(batch_number):
+                  x_batch = self.x_valid[i*BATCH_SIZE:(i+1)*BATCH_SIZE,:]
+                  y_batch = self.y_valid[i*BATCH_SIZE:(i+1)*BATCH_SIZE,:]
+                  
+                  feed_dict = {self.x_inputs:x_batch, self.y_inputs:y_batch}
+ 
+                  loss = self.batch_loss(feed_dict)
+                  cumulative_loss += loss
+                  average_loss = cumulative_loss/(i+1)
+         
+                  sys.stdout.write("\r validation loss : "+str(average_loss)+" | "+str(i+1)+"th/"+str(batch_number)+"batches")
+                  sys.stdout.flush()
+                  valid_loss += loss
+                
+		valid_loss = valid_loss/batch_number
+		self.validation_loss.append(valid_loss)
+		print "\n Validation loss:  ", valid_loss
+                
+		if self.min_valid_loss > valid_loss:
+			self.update_optimal_variables()
+
+		return valid_loss
+
+
+	def use_optimal_paras(self):
+		for i in self.paras.keys():
+			self.paras[i] = self.opt_paras[i]
+
+	def run_test(self, use_optimal_parameter=True):
+		if use_optimal_parameter == True:
+			self.use_optimal_paras()
+                
+                self.x_test , self.y_test = get_CIFAR_data(False)
+		test_size = len(self.x_test)
+		feed_dict = {self.x_inputs: self.x_test, self.y_inputs: self.y_test}
+		self.test_loss = self.batch_loss(feed_dict)
+		self.test_out = self.batch_out(feed_dict)
+		print "Test loss:  ", self.test_loss
+		return self.test_loss, self.test_out
+
+	def build_graph(self):
+		self._create_place_holders()
+		self._inference()
+		self._create_loss()
+		self._create_optimizer(OPTIMIZER_TYPE)
+
+	def initialize_variables(self):
+		init = tf.global_variables_initializer()
+		sess.run(init)
+
+
+	def update_optimal_variables(self):
+		for i in self.paras.keys():
+			self.opt_paras[i] = self.paras[i]
+
+
+	def run(self):
+		self.build_graph()
+		self.initialize_variables()
+		for i in range(EPOCH):
+			self.run_train_epoch()
+			self.run_validation()
+			print "\n"
+		self.run_test(True)
+		test_accuracy = classification_accuracy(self.test_out, self.y_test)
+		np.save('test_out.npy',self.test_out)
+		np.save('test_loss.npy',self.test_loss)
+		np.save('test_accuracy.npy',test_accuracy)
+
+		saver = tf.train.Saver()
+		save_path = saver.save(self.sess, "LRNN.ckpt")
+		print("Model saved in file: %s" % save_path)
+
+		for i in self.paras.keys():
+			np.save(i+'.npy', self.sess.run(self.paras[i]))
+			print "\n Save Parameter: ", i
+		
+		feed_dict = {self.x_inputs: self.x_train, self.y_inputs: self.y_train}
+		self.train_out = self.batch_out(feed_dict)
+		np.save('train_out.npy',self.train_out)
+
+		np.save('train_loss.npy',self.train_loss)
+		np.save('validation_loss.npy',self.validation_loss)
+		pdb.set_trace()
+		return
+
+sess = tf.Session()
+x_train , y_train = get_CIFAR_data(True) 
+model1  = Model(sess,x_train,y_train)
+model1.run()
+
+
+
+
+
+
+
+
+
+
+
+
